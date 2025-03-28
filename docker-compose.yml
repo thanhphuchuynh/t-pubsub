@@ -1,0 +1,67 @@
+# Removed obsolete version attribute
+
+services:
+  # PubSub demo application
+  pubsub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pubsub-demo
+    ports:
+      - "2112:2112"  # Expose Prometheus metrics endpoint
+    networks:
+      - pubsub-network
+    restart: unless-stopped
+    # Add healthcheck to ensure service is working properly
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:2112/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: pubsub-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    networks:
+      - pubsub-network
+    restart: unless-stopped
+    # Ensure Prometheus starts after pubsub service is ready
+    depends_on:
+      pubsub:
+        condition: service_healthy
+
+  # Grafana for metrics visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: pubsub-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=pubsub123
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    networks:
+      - pubsub-network
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+networks:
+  pubsub-network:
+    driver: bridge
