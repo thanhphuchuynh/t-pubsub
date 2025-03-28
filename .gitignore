@@ -4,8 +4,6 @@
 *.dll
 *.so
 *.dylib
-pubsub
-
 # Test binary, built with `go test -c`
 *.test
 
@@ -41,10 +39,6 @@ pubsub_report.json
 *.pem
 *.env
 .docker/
-
-# Prometheus & Grafana
-prometheus/data/
-grafana/data/
 
 # Temporary files
 tmp/
