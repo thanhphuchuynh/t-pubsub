@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/tphuc/pubsub/model"
-	"github.com/tphuc/pubsub/pubsub"
+	"github.com/thanhphuchuynh/t-pubsub/model"
+	"github.com/thanhphuchuynh/t-pubsub/pubsub"
 )
 
 var (

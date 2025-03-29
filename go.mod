@@ -1,4 +1,4 @@
-module github.com/tphuc/pubsub
+module github.com/thanhphuchuynh/t-pubsub
 
 go 1.18
 

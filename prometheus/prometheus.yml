@@ -10,7 +10,7 @@ scrape_configs:
       - targets: ['pubsub:2112']
     honor_labels: true
     scrape_timeout: 4s
-    metrics_relabel_configs:
+    metric_relabel_configs:
       - source_labels: [__name__]
         regex: '.*'
         action: keep

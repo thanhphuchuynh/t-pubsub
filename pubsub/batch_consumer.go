@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tphuc/pubsub/model"
+	"github.com/thanhphuchuynh/t-pubsub/model"
 )
 
 // BatchConsumerConfig defines configuration for batch consumer

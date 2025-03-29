@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tphuc/pubsub/model"
+	"github.com/thanhphuchuynh/t-pubsub/model"
 )
 
 // BenchmarkConfig holds configuration for the benchmark

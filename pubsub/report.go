@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tphuc/pubsub/model"
+	"github.com/thanhphuchuynh/t-pubsub/model"
 )
 
 // ReportData contains the data for a PubSub report

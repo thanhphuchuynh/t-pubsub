@@ -12,7 +12,7 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o pubsub .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o pubsub-app .
 
 # Create a minimal runtime image
 FROM alpine:latest
@@ -23,7 +23,7 @@ WORKDIR /app
 RUN apk --no-cache add ca-certificates wget
 
 # Copy the binary from the builder stage
-COPY --from=builder /app/pubsub .
+COPY --from=builder /app/pubsub-app ./pubsub-app
 
 # Expose the metrics port
 EXPOSE 2112
@@ -33,4 +33,4 @@ HEALTHCHECK --interval=5s --timeout=3s --start-period=5s --retries=3 \
   CMD wget -q -O- http://localhost:2112/health || exit 1
 
 # Run the application
-CMD ["./pubsub"]
+CMD ["./pubsub-app"]

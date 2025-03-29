@@ -22,7 +22,7 @@ A high-performance, metrics-enabled publish-subscribe system built in Go with fu
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/tphuc/pubsub.git
+   git clone https://github.com/thanhphuchuynh/t-pubsub.git
    cd pubsub
    ```
 
