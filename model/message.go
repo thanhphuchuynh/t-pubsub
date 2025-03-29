@@ -2,6 +2,8 @@ package model
 
 import (
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Message represents a message in the pub/sub system
@@ -31,7 +33,8 @@ func NewMessageWithID(id string, content interface{}) Message {
 
 // Pure function to generate a unique ID
 func GenerateUniqueID() string {
-	return time.Now().Format("20060102150405") + "-" + RandomString(8)
+	// add uuid
+	return uuid.New().String()
 }
 
 // Pure function to generate a random string

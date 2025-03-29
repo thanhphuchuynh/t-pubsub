@@ -8,14 +8,33 @@ import (
 	"github.com/thanhphuchuynh/t-pubsub/model"
 )
 
+// SimulationConfig holds configuration for simulating different pubsub scenarios
+type SimulationConfig struct {
+	PushInterval time.Duration // Interval between automatic pushes (0 disables auto-push)
+}
+
+// NewSimulationConfig creates a default simulation configuration
+func NewSimulationConfig() SimulationConfig {
+	return SimulationConfig{
+		PushInterval: 0, // Default to disabled auto-push
+	}
+}
+
+// WithPushInterval sets the push interval for the simulation
+func (c SimulationConfig) WithPushInterval(interval time.Duration) SimulationConfig {
+	c.PushInterval = interval
+	return c
+}
+
 // BenchmarkConfig holds configuration for the benchmark
 type BenchmarkConfig struct {
-	MessageCount        int           // Number of messages to publish
-	ConcurrentProducers int           // Number of concurrent producers
-	ConcurrentConsumers int           // Number of concurrent consumers
-	MessageSize         int           // Size of each message in bytes (approximate)
-	WarmupCount         int           // Number of warmup messages before measurement
-	RunDuration         time.Duration // Duration to run the benchmark
+	MessageCount        int              // Number of messages to publish
+	ConcurrentProducers int              // Number of concurrent producers
+	ConcurrentConsumers int              // Number of concurrent consumers
+	MessageSize         int              // Size of each message in bytes (approximate)
+	WarmupCount         int              // Number of warmup messages before measurement
+	RunDuration         time.Duration    // Duration to run the benchmark
+	SimulationConfig    SimulationConfig // Configuration for simulating pubsub behavior
 }
 
 // NewBenchmarkConfig creates a default benchmark configuration
@@ -27,6 +46,7 @@ func NewBenchmarkConfig() BenchmarkConfig {
 		MessageSize:         1024, // 1KB
 		WarmupCount:         100,
 		RunDuration:         10 * time.Second,
+		SimulationConfig:    NewSimulationConfig(),
 	}
 }
 
@@ -186,6 +206,9 @@ func RunBenchmark(ps *PubSub, config BenchmarkConfig) BenchmarkResult {
 	for i := 0; i < config.ConcurrentConsumers; i++ {
 		benchmarkPubSub = Subscribe(benchmarkPubSub, benchConsumer)
 	}
+
+	// Configure the pubsub instance with simulation settings
+	benchmarkPubSub = NewPubSub(WithPushInterval(config.SimulationConfig.PushInterval))
 
 	// Generate message content of the specified size
 	generateMessage := func(i int) map[string]interface{} {
@@ -365,35 +388,50 @@ func RunBenchmark(ps *PubSub, config BenchmarkConfig) BenchmarkResult {
 func RunFunctionalBenchmark(ps *PubSub) map[string]BenchmarkResult {
 	results := make(map[string]BenchmarkResult)
 
-	// Small messages, single producer/consumer
+	// Create simulation configs with different push intervals
+	noPushConfig := NewSimulationConfig()
+	fastPushConfig := NewSimulationConfig().WithPushInterval(100 * time.Millisecond)
+	slowPushConfig := NewSimulationConfig().WithPushInterval(1 * time.Second)
+
+	// Small messages, single producer/consumer, no auto-push
 	smallConfig := NewBenchmarkConfig().
 		WithMessageCount(1000).
 		WithMessageSize(128).
 		WithConcurrentProducers(1).
 		WithConcurrentConsumers(1).
 		WithRunDuration(5 * time.Second)
+	smallConfig.SimulationConfig = noPushConfig
+	results["small_no_push"] = RunBenchmark(ps, smallConfig)
 
-	results["small_single"] = RunBenchmark(ps, smallConfig)
+	// Small messages with fast auto-push
+	smallFastConfig := smallConfig
+	smallFastConfig.SimulationConfig = fastPushConfig
+	results["small_fast_push"] = RunBenchmark(ps, smallFastConfig)
 
-	// Medium messages, multiple producers/consumers
+	// Medium messages, multiple producers/consumers, slow auto-push
 	mediumConfig := NewBenchmarkConfig().
 		WithMessageCount(500).
 		WithMessageSize(1024).
 		WithConcurrentProducers(2).
 		WithConcurrentConsumers(2).
 		WithRunDuration(5 * time.Second)
+	mediumConfig.SimulationConfig = slowPushConfig
+	results["medium_slow_push"] = RunBenchmark(ps, mediumConfig)
 
-	results["medium_multi"] = RunBenchmark(ps, mediumConfig)
-
-	// Large messages, single producer/consumer
+	// Large messages, single producer/consumer, no auto-push
 	largeConfig := NewBenchmarkConfig().
 		WithMessageCount(100).
 		WithMessageSize(10240). // 10KB
 		WithConcurrentProducers(1).
 		WithConcurrentConsumers(1).
 		WithRunDuration(5 * time.Second)
+	largeConfig.SimulationConfig = noPushConfig
+	results["large_no_push"] = RunBenchmark(ps, largeConfig)
 
-	results["large_single"] = RunBenchmark(ps, largeConfig)
+	// Large messages with fast auto-push
+	largeFastConfig := largeConfig
+	largeFastConfig.SimulationConfig = fastPushConfig
+	results["large_fast_push"] = RunBenchmark(ps, largeFastConfig)
 
 	return results
 }

@@ -130,6 +130,8 @@ func (r *Reporter) WrapConsumer(consumer ConsumerFunc) ConsumerFunc {
 	consumerID := r.GetNextConsumerID()
 
 	return func(msg model.Message) {
+		start := time.Now()
+
 		defer func() {
 			if rec := recover(); rec != nil {
 				err, ok := rec.(error)
@@ -137,11 +139,25 @@ func (r *Reporter) WrapConsumer(consumer ConsumerFunc) ConsumerFunc {
 					err = fmt.Errorf("%v", rec)
 				}
 				r.RecordError(err)
+				GetDefaultMetrics().ProcessingErrors.Inc()
 			}
+			GetDefaultMetrics().ConsumerLatency.Observe(time.Since(start).Seconds())
 		}()
 
-		r.RecordMessage(consumerID, msg)
+		// Record startup of consumer processing
+		GetDefaultMetrics().ConsumersActive.Inc()
+		defer GetDefaultMetrics().ConsumersActive.Dec()
+
+		// Record processing time
+		processStart := time.Now()
 		consumer(msg)
+		GetDefaultMetrics().ProcessingTime.Observe(time.Since(processStart).Seconds())
+
+		// Record message statistics
+		r.RecordMessage(consumerID, msg)
+		GetDefaultMetrics().MessagesDelivered.Inc()
+		GetDefaultMetrics().ConsumerRate.Inc()
+		GetDefaultMetrics().MessagesCompleted.Inc()
 	}
 }
 
@@ -198,7 +214,14 @@ func (r *Reporter) PrintReport(w io.Writer) {
 // Subscribe a consumer with reporting
 func SubscribeWithReporting(ps *PubSub, reporter *Reporter, consumer ConsumerFunc) *PubSub {
 	wrappedConsumer := reporter.WrapConsumer(consumer)
-	return Subscribe(ps, wrappedConsumer)
+	newPS := Subscribe(ps, wrappedConsumer)
+
+	// Update consumer metrics after subscription
+	metrics := GetDefaultMetrics()
+	consumerCount := len(newPS.GetConsumers())
+	metrics.ConsumerCount.Set(float64(consumerCount))
+
+	return newPS
 }
 
 // Method for backward compatibility

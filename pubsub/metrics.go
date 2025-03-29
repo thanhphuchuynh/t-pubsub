@@ -5,6 +5,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // MetricGetter defines an interface for getting metric values
@@ -18,11 +19,14 @@ type PrometheusCounter struct {
 }
 
 func (pc PrometheusCounter) GetValue() float64 {
-	// This is an approximation as prometheus doesn't expose direct value access
-	m := make(chan prometheus.Metric, 1)
-	pc.Collect(m)
-	close(m)
-	// In a real implementation we would parse the value, but for now return 0
+	var metric dto.Metric
+	err := pc.Write(&metric)
+	if err != nil {
+		return 0
+	}
+	if metric.Counter != nil {
+		return metric.Counter.GetValue()
+	}
 	return 0
 }
 
@@ -32,31 +36,55 @@ type PrometheusGauge struct {
 }
 
 func (pg PrometheusGauge) GetValue() float64 {
-	// This is an approximation as prometheus doesn't expose direct value access
-	m := make(chan prometheus.Metric, 1)
-	pg.Collect(m)
-	close(m)
-	// In a real implementation we would parse the value, but for now return 0
+	var metric dto.Metric
+	err := pg.Write(&metric)
+	if err != nil {
+		return 0
+	}
+	if metric.Gauge != nil {
+		return metric.Gauge.GetValue()
+	}
 	return 0
 }
 
 // MetricsRegistry holds all the Prometheus metrics for the PubSub system
 type MetricsRegistry struct {
 	// Message metrics
-	MessagesPublished PrometheusCounter
-	MessagesDelivered PrometheusCounter
-	MessageSize       prometheus.Histogram
+	MessagesPublished    PrometheusCounter
+	MessagesDelivered    PrometheusCounter
+	MessageSize          prometheus.Histogram
+	MessagesInQueue      PrometheusGauge
+	MessagesCompleted    PrometheusCounter
+	MessagesDropped      PrometheusCounter
+	MessagesFailedToSend PrometheusCounter
+
+	// Rate metrics
+	ProducerRate prometheus.Gauge
+	ConsumerRate prometheus.Gauge
+
+	// Timing metrics
+	ProcessingTime prometheus.Histogram
+	QueueTime      prometheus.Histogram
 
 	// Consumer metrics
 	ConsumerCount   PrometheusGauge
 	ConsumerLatency prometheus.Histogram
+	ConsumersActive PrometheusGauge
 
 	// Queue metrics
-	QueueSize PrometheusGauge
-	BatchSize prometheus.Histogram
+	QueueSize        PrometheusGauge
+	QueueCapacity    PrometheusGauge
+	BatchSize        prometheus.Histogram
+	QueueUtilization prometheus.Gauge
+
+	// Producer metrics
+	ProducerCount   PrometheusGauge
+	ProducersActive PrometheusGauge
 
 	// Error metrics
-	ErrorsTotal PrometheusCounter
+	ErrorsTotal      PrometheusCounter
+	ValidationErrors PrometheusCounter
+	ProcessingErrors PrometheusCounter
 }
 
 // Create a registry for our metrics
@@ -93,6 +121,34 @@ func NewMetricsRegistry(namespace string) *MetricsRegistry {
 				Help:      "The total number of messages delivered to consumers",
 			}),
 		},
+		MessagesInQueue: PrometheusGauge{
+			promauto.With(prometheus.DefaultRegisterer).NewGauge(prometheus.GaugeOpts{
+				Namespace: namespace,
+				Name:      "messages_in_queue",
+				Help:      "The current number of messages waiting in the queue",
+			}),
+		},
+		MessagesCompleted: PrometheusCounter{
+			promauto.With(prometheus.DefaultRegisterer).NewCounter(prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "messages_completed_total",
+				Help:      "The total number of messages successfully processed",
+			}),
+		},
+		MessagesDropped: PrometheusCounter{
+			promauto.With(prometheus.DefaultRegisterer).NewCounter(prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "messages_dropped_total",
+				Help:      "The total number of messages dropped due to queue full or other issues",
+			}),
+		},
+		MessagesFailedToSend: PrometheusCounter{
+			promauto.With(prometheus.DefaultRegisterer).NewCounter(prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "messages_failed_to_send_total",
+				Help:      "The total number of messages that failed to be sent",
+			}),
+		},
 		MessageSize: promauto.With(prometheus.DefaultRegisterer).NewHistogram(prometheus.HistogramOpts{
 			Namespace: namespace,
 			Name:      "message_size_bytes",
@@ -100,12 +156,45 @@ func NewMetricsRegistry(namespace string) *MetricsRegistry {
 			Buckets:   prometheus.ExponentialBuckets(64, 2, 10),
 		}),
 
+		// Rate metrics
+		ProducerRate: promauto.With(prometheus.DefaultRegisterer).NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "producer_message_rate",
+			Help:      "Current rate of messages being produced per second",
+		}),
+		ConsumerRate: promauto.With(prometheus.DefaultRegisterer).NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "consumer_message_rate",
+			Help:      "Current rate of messages being consumed per second",
+		}),
+
+		// Timing metrics
+		ProcessingTime: promauto.With(prometheus.DefaultRegisterer).NewHistogram(prometheus.HistogramOpts{
+			Namespace: namespace,
+			Name:      "message_processing_duration_seconds",
+			Help:      "Time taken to process messages",
+			Buckets:   prometheus.ExponentialBuckets(0.001, 2, 10),
+		}),
+		QueueTime: promauto.With(prometheus.DefaultRegisterer).NewHistogram(prometheus.HistogramOpts{
+			Namespace: namespace,
+			Name:      "message_queue_duration_seconds",
+			Help:      "Time messages spend in the queue before being processed",
+			Buckets:   prometheus.ExponentialBuckets(0.001, 2, 10),
+		}),
+
 		// Consumer metrics
 		ConsumerCount: PrometheusGauge{
 			promauto.With(prometheus.DefaultRegisterer).NewGauge(prometheus.GaugeOpts{
 				Namespace: namespace,
 				Name:      "consumer_count",
-				Help:      "The current number of consumers",
+				Help:      "The total number of registered consumers",
+			}),
+		},
+		ConsumersActive: PrometheusGauge{
+			promauto.With(prometheus.DefaultRegisterer).NewGauge(prometheus.GaugeOpts{
+				Namespace: namespace,
+				Name:      "consumers_active",
+				Help:      "The number of currently active consumers",
 			}),
 		},
 		ConsumerLatency: promauto.With(prometheus.DefaultRegisterer).NewHistogram(prometheus.HistogramOpts{
@@ -123,12 +212,40 @@ func NewMetricsRegistry(namespace string) *MetricsRegistry {
 				Help:      "The current number of messages in the queue",
 			}),
 		},
+		QueueCapacity: PrometheusGauge{
+			promauto.With(prometheus.DefaultRegisterer).NewGauge(prometheus.GaugeOpts{
+				Namespace: namespace,
+				Name:      "queue_capacity",
+				Help:      "The maximum capacity of the queue",
+			}),
+		},
+		QueueUtilization: promauto.With(prometheus.DefaultRegisterer).NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "queue_utilization_percent",
+			Help:      "The current queue utilization as a percentage",
+		}),
 		BatchSize: promauto.With(prometheus.DefaultRegisterer).NewHistogram(prometheus.HistogramOpts{
 			Namespace: namespace,
 			Name:      "batch_size",
 			Help:      "Distribution of batch sizes",
 			Buckets:   prometheus.LinearBuckets(1, 1, 10),
 		}),
+
+		// Producer metrics
+		ProducerCount: PrometheusGauge{
+			promauto.With(prometheus.DefaultRegisterer).NewGauge(prometheus.GaugeOpts{
+				Namespace: namespace,
+				Name:      "producer_count",
+				Help:      "The total number of registered producers",
+			}),
+		},
+		ProducersActive: PrometheusGauge{
+			promauto.With(prometheus.DefaultRegisterer).NewGauge(prometheus.GaugeOpts{
+				Namespace: namespace,
+				Name:      "producers_active",
+				Help:      "The number of currently active producers",
+			}),
+		},
 
 		// Error metrics
 		ErrorsTotal: PrometheusCounter{
@@ -138,11 +255,32 @@ func NewMetricsRegistry(namespace string) *MetricsRegistry {
 				Help:      "The total number of errors encountered",
 			}),
 		},
+		ValidationErrors: PrometheusCounter{
+			promauto.With(prometheus.DefaultRegisterer).NewCounter(prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "validation_errors_total",
+				Help:      "The total number of message validation errors",
+			}),
+		},
+		ProcessingErrors: PrometheusCounter{
+			promauto.With(prometheus.DefaultRegisterer).NewCounter(prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "processing_errors_total",
+				Help:      "The total number of message processing errors",
+			}),
+		},
 	}
 
-	// Initialize default metrics values to ensure they show up even with zero values
+	// Initialize default metrics values
 	registry.ConsumerCount.Set(0)
+	registry.ConsumersActive.Set(0)
+	registry.ProducerCount.Set(0)
+	registry.ProducersActive.Set(0)
 	registry.QueueSize.Set(0)
+	registry.QueueCapacity.Set(1000) // Default capacity
+	registry.QueueUtilization.Set(0)
+	registry.ProducerRate.Set(0)
+	registry.ConsumerRate.Set(0)
 
 	return registry
 }

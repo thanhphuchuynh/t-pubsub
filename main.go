@@ -183,10 +183,12 @@ type BenchmarkRequest struct {
 
 // SimulationConfig represents configuration for continuous simulation
 type SimulationConfig struct {
-	MessageRate int    `json:"messageRate"` // Messages per second
-	MessageSize int    `json:"messageSize"` // Message size in bytes
-	Duration    string `json:"duration"`    // Optional duration (e.g., "1h")
-	ConsumerLag string `json:"consumerLag"` // Optional consumer lag simulation (e.g., "100ms")
+	MessageRate     int    `json:"messageRate"`     // Messages per second
+	MessageSize     int    `json:"messageSize"`     // Message size in bytes
+	Duration        string `json:"duration"`        // Optional duration (e.g., "1h")
+	ConsumerLag     string `json:"consumerLag"`     // Optional consumer lag simulation (e.g., "100ms")
+	NumberProducers int    `json:"numberProducers"` // Number of concurrent producers
+	NumberConsumers int    `json:"numberConsumers"` // Number of concurrent consumers
 }
 
 // SystemStatus represents the current system status
@@ -293,8 +295,10 @@ func handleStartSimulation(w http.ResponseWriter, r *http.Request) {
 
 	// Parse simulation config
 	var config SimulationConfig
-	config.MessageRate = 10   // Default: 10 messages per second
-	config.MessageSize = 1024 // Default: 1KB messages
+	config.MessageRate = 10    // Default: 10 messages per second
+	config.MessageSize = 1024  // Default: 1KB messages
+	config.NumberProducers = 1 // Default: 1 producer
+	config.NumberConsumers = 2 // Default: 2 consumers
 
 	// Try to decode JSON request body
 	if r.Header.Get("Content-Type") == "application/json" {
@@ -311,6 +315,12 @@ func handleStartSimulation(w http.ResponseWriter, r *http.Request) {
 			}
 			if size, err := strconv.Atoi(r.FormValue("messageSize")); err == nil && size > 0 {
 				config.MessageSize = size
+			}
+			if producers, err := strconv.Atoi(r.FormValue("numberProducers")); err == nil && producers > 0 {
+				config.NumberProducers = producers
+			}
+			if consumers, err := strconv.Atoi(r.FormValue("numberConsumers")); err == nil && consumers > 0 {
+				config.NumberConsumers = consumers
 			}
 			config.Duration = r.FormValue("duration")
 			config.ConsumerLag = r.FormValue("consumerLag")
@@ -339,8 +349,22 @@ func handleStartSimulation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Start simulation in background
-	go runContinuousSimulation(config.MessageRate, config.MessageSize, consumerLag)
+	// Clear existing consumers
+	globalPS = pubsub.NewPubSub()
+
+	// Create new consumers based on config
+	for i := 0; i < config.NumberConsumers; i++ {
+		consumerIndex := i
+		consumer := func(msg model.Message) {
+			fmt.Printf("Consumer %d received: %v (ID: %s)\n", consumerIndex+1, msg.Content, msg.ID)
+		}
+		globalPS = pubsub.SubscribeWithReporting(globalPS, pubsub.NewReporter(), consumer)
+	}
+
+	// Start multiple simulation producers in background
+	for i := 0; i < config.NumberProducers; i++ {
+		go runContinuousSimulation(config.MessageRate/config.NumberProducers, config.MessageSize, consumerLag)
+	}
 
 	// If duration specified, setup timeout
 	if hasTimeout {
@@ -357,10 +381,12 @@ func handleStartSimulation(w http.ResponseWriter, r *http.Request) {
 	// Return success
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":      "started",
-		"messageRate": config.MessageRate,
-		"messageSize": config.MessageSize,
-		"duration":    config.Duration,
+		"status":          "started",
+		"messageRate":     config.MessageRate,
+		"messageSize":     config.MessageSize,
+		"numberProducers": config.NumberProducers,
+		"numberConsumers": config.NumberConsumers,
+		"duration":        config.Duration,
 	})
 }
 
@@ -425,6 +451,13 @@ func runContinuousSimulation(messagesPerSecond, messageSize int, consumerLag tim
 	fmt.Printf("Starting continuous simulation: %d msgs/sec, %d bytes/msg\n",
 		messagesPerSecond, messageSize)
 
+	// Update producer metrics
+	metrics := globalPS.GetMetrics()
+	metrics.ProducerCount.Inc()
+	metrics.ProducersActive.Inc()
+	defer metrics.ProducersActive.Dec()
+	defer metrics.ProducerCount.Dec()
+
 	// Calculate delay between messages
 	delay := time.Second / time.Duration(messagesPerSecond)
 
@@ -433,6 +466,8 @@ func runContinuousSimulation(messagesPerSecond, messageSize int, consumerLag tim
 	defer ticker.Stop()
 
 	counter := 0
+	start := time.Now()
+	messageCount := 0
 
 	for {
 		select {
@@ -442,6 +477,14 @@ func runContinuousSimulation(messagesPerSecond, messageSize int, consumerLag tim
 
 			// Publish to the global PubSub instance
 			msgID := pubsub.Publish(globalPS, msgContent)
+
+			// Update producer rate metric
+			elapsed := time.Since(start).Seconds()
+			if elapsed > 0 {
+				rate := float64(messageCount) / elapsed
+				metrics.ProducerRate.Set(rate)
+			}
+			messageCount++
 
 			// If consumer lag is specified, delay the push
 			if consumerLag > 0 {

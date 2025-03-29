@@ -27,9 +27,18 @@ type InMemoryMessageStore struct {
 
 // NewInMemoryMessageStore creates a new message store
 func NewInMemoryMessageStore() *InMemoryMessageStore {
-	return &InMemoryMessageStore{
+	store := &InMemoryMessageStore{
 		messages: make([]model.Message, 0),
 	}
+
+	// Initialize queue metrics
+	metrics := GetDefaultMetrics()
+	metrics.QueueSize.Set(0)
+	metrics.MessagesInQueue.Set(0)
+	metrics.QueueUtilization.Set(0)
+	metrics.QueueCapacity.Set(1000) // Default capacity
+
+	return store
 }
 
 // AddMessage adds a message to the store
@@ -41,6 +50,12 @@ func (store *InMemoryMessageStore) AddMessage(msg model.Message) MessageStore {
 	newMessages := make([]model.Message, len(store.messages), len(store.messages)+1)
 	copy(newMessages, store.messages)
 	store.messages = append(newMessages, msg)
+
+	// Update queue metrics
+	metrics := GetDefaultMetrics()
+	metrics.QueueSize.Set(float64(len(store.messages)))
+	metrics.MessagesInQueue.Set(float64(len(store.messages)))
+	metrics.QueueUtilization.Set(float64(len(store.messages)) / float64(1000) * 100) // 1000 is default capacity
 
 	return store
 }
@@ -101,6 +116,13 @@ func (store *InMemoryMessageStore) ClearMessages() MessageStore {
 	defer store.mutex.Unlock()
 
 	store.messages = make([]model.Message, 0)
+
+	// Reset queue metrics
+	metrics := GetDefaultMetrics()
+	metrics.QueueSize.Set(0)
+	metrics.MessagesInQueue.Set(0)
+	metrics.QueueUtilization.Set(0)
+
 	return store
 }
 
@@ -144,10 +166,18 @@ func NewPubSub(options ...Option) *PubSub {
 		store:        NewInMemoryMessageStore(),
 		consumers:    make([]ConsumerFunc, 0),
 		mutex:        sync.RWMutex{},
-		pushInterval: 2 * time.Second, // Default interval
+		pushInterval: 0, // Default interval (0 means no auto push)
 		stopChan:     make(chan struct{}),
 		metrics:      GetDefaultMetrics(), // Use default metrics by default
 	}
+
+	// Initialize metrics
+	ps.metrics.ConsumerCount.Set(0)
+	ps.metrics.ProducerCount.Set(0)
+	ps.metrics.QueueCapacity.Set(1000) // Default capacity
+	ps.metrics.QueueSize.Set(0)
+	ps.metrics.MessagesInQueue.Set(0)
+	ps.metrics.QueueUtilization.Set(0)
 
 	// Apply all options
 	for _, option := range options {
@@ -196,8 +226,12 @@ func Subscribe(ps *PubSub, consumer ConsumerFunc) *PubSub {
 		metrics:      ps.metrics,
 	}
 
-	// Update consumer count metric
+	// Update consumer metrics
 	newPS.metrics.ConsumerCount.Set(float64(len(newConsumers)))
+	newPS.metrics.ProducerCount.Set(1) // Each subscription implies at least one producer
+
+	// Initialize producer to active since we're starting with messages
+	newPS.metrics.ProducersActive.Set(1)
 
 	return newPS
 }
@@ -215,10 +249,20 @@ func Publish(ps *PubSub, content interface{}) string {
 	// Update metrics
 	ps.metrics.MessagesPublished.Inc()
 	ps.metrics.QueueSize.Inc()
+	ps.metrics.MessagesInQueue.Inc()
+
+	// Calculate and update queue utilization
+	queueSize := ps.store.GetMessages()
+	ps.metrics.QueueUtilization.Set(float64(len(queueSize)) / float64(1000) * 100) // 1000 is default capacity
 
 	// Estimate message size
 	size := estimateMessageSize(content)
 	ps.metrics.MessageSize.Observe(float64(size))
+
+	// Update producer rate
+	ps.metrics.ProducerRate.Inc()
+	ps.metrics.ProducersActive.Inc()
+	defer ps.metrics.ProducersActive.Dec()
 
 	return msg.ID
 }
@@ -236,10 +280,20 @@ func PublishWithID(ps *PubSub, id string, content interface{}) string {
 	// Update metrics
 	ps.metrics.MessagesPublished.Inc()
 	ps.metrics.QueueSize.Inc()
+	ps.metrics.MessagesInQueue.Inc()
+
+	// Calculate and update queue utilization
+	queueSize := ps.store.GetMessages()
+	ps.metrics.QueueUtilization.Set(float64(len(queueSize)) / float64(1000) * 100)
 
 	// Estimate message size
 	size := estimateMessageSize(content)
 	ps.metrics.MessageSize.Observe(float64(size))
+
+	// Update producer rate
+	ps.metrics.ProducerRate.Inc()
+	ps.metrics.ProducersActive.Inc()
+	defer ps.metrics.ProducersActive.Dec()
 
 	return msg.ID
 }
@@ -253,8 +307,12 @@ func (ps *PubSub) PushByID(messageID string) bool {
 func PushByID(ps *PubSub, messageID string) bool {
 	msg, found := ps.store.GetMessageByID(messageID)
 	if !found {
+		ps.metrics.MessagesDropped.Inc()
 		return false
 	}
+
+	// Track queue time
+	ps.metrics.QueueTime.Observe(time.Since(msg.Timestamp).Seconds())
 
 	// Get a copy of consumers
 	ps.mutex.RLock()
@@ -262,16 +320,36 @@ func PushByID(ps *PubSub, messageID string) bool {
 	copy(consumers, ps.consumers)
 	ps.mutex.RUnlock()
 
+	// Set active consumers for this message
+	ps.metrics.ConsumersActive.Set(float64(len(consumers)))
+
 	// Apply each consumer to the message
 	start := time.Now()
 	for _, consumer := range consumers {
 		// Use a goroutine to avoid blocking
 		go func(c ConsumerFunc, m model.Message, startTime time.Time) {
+			// Track processing time
+			processStart := time.Now()
 			c(m)
+			ps.metrics.ProcessingTime.Observe(time.Since(processStart).Seconds())
+
 			ps.metrics.MessagesDelivered.Inc()
 			ps.metrics.ConsumerLatency.Observe(time.Since(startTime).Seconds())
+			ps.metrics.ConsumerRate.Inc()
 		}(consumer, msg, start)
 	}
+
+	// Reset active consumers after all goroutines are launched
+	ps.metrics.ConsumersActive.Set(0)
+
+	// Update message status metrics
+	ps.metrics.MessagesCompleted.Inc()
+	ps.metrics.MessagesInQueue.Dec()
+	ps.metrics.QueueSize.Dec()
+
+	// Recalculate queue utilization
+	queueSize := ps.store.GetMessages()
+	ps.metrics.QueueUtilization.Set(float64(len(queueSize)) / float64(1000) * 100)
 
 	return true
 }
@@ -287,6 +365,10 @@ func PushAll(ps *PubSub) {
 
 	// Update queue size metric
 	ps.metrics.QueueSize.Set(float64(len(messages)))
+	ps.metrics.MessagesInQueue.Set(float64(len(messages)))
+
+	// Calculate queue utilization
+	ps.metrics.QueueUtilization.Set(float64(len(messages)) / float64(1000) * 100)
 
 	// Get a copy of consumers
 	ps.mutex.RLock()
@@ -294,18 +376,36 @@ func PushAll(ps *PubSub) {
 	copy(consumers, ps.consumers)
 	ps.mutex.RUnlock()
 
+	// Set active consumers for the whole batch
+	ps.metrics.ConsumersActive.Set(float64(len(consumers)))
+
 	// For each message, apply all consumers
-	start := time.Now()
 	for _, msg := range messages {
+		// Track queue time for each message
+		ps.metrics.QueueTime.Observe(time.Since(msg.Timestamp).Seconds())
+		start := time.Now()
+
 		for _, consumer := range consumers {
 			// Use a goroutine to avoid blocking
 			go func(c ConsumerFunc, m model.Message, startTime time.Time) {
+				// Track processing time
+				processStart := time.Now()
 				c(m)
+				ps.metrics.ProcessingTime.Observe(time.Since(processStart).Seconds())
+
 				ps.metrics.MessagesDelivered.Inc()
 				ps.metrics.ConsumerLatency.Observe(time.Since(startTime).Seconds())
+				ps.metrics.ConsumerRate.Inc()
+				ps.metrics.MessagesCompleted.Inc()
 			}(consumer, msg, start)
 		}
 	}
+
+	// Update message counts and reset metrics after processing batch
+	ps.metrics.MessagesInQueue.Set(0)
+	ps.metrics.QueueSize.Set(0)
+	ps.metrics.QueueUtilization.Set(0)
+	ps.metrics.ConsumersActive.Set(0) // Reset active consumers count
 }
 
 // StartAutoPush starts pushing messages automatically at intervals (as a method for backwards compatibility)
@@ -315,6 +415,11 @@ func (ps *PubSub) StartAutoPush() *PubSub {
 
 // StartAutoPush starts pushing messages automatically at intervals (functional approach)
 func StartAutoPush(ps *PubSub) *PubSub {
+	// If push interval is 0, don't start auto push
+	if ps.pushInterval == 0 {
+		return ps
+	}
+
 	ps.mutex.Lock()
 	ps.stopChan = make(chan struct{})
 	ps.mutex.Unlock()
@@ -361,7 +466,20 @@ func (ps *PubSub) Clear() *PubSub {
 // Clear removes all messages from the queue (functional approach)
 func Clear(ps *PubSub) *PubSub {
 	ps.store.ClearMessages()
+
+	// Reset all queue-related metrics
 	ps.metrics.QueueSize.Set(0)
+	ps.metrics.MessagesInQueue.Set(0)
+	ps.metrics.QueueUtilization.Set(0)
+
+	// Reset rates
+	ps.metrics.ProducerRate.Set(0)
+	ps.metrics.ConsumerRate.Set(0)
+
+	// Reset active counts (in case they were stuck)
+	ps.metrics.ProducersActive.Set(0)
+	ps.metrics.ConsumersActive.Set(0)
+
 	return ps
 }
 
