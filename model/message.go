@@ -22,6 +22,15 @@ func NewMessage(content interface{}) Message {
 	}
 }
 
+// ValidType checks if the message content is of type T and returns it
+// This is a generic function rather than a method since Go methods cannot have type parameters
+func ValidType[T any](m *Message, t T) (bool, T) {
+	if msg, ok := m.Content.(T); ok {
+		return true, msg
+	}
+	return false, *new(T)
+}
+
 // Pure function to create a new message with a custom ID
 func NewMessageWithID(id string, content interface{}) Message {
 	return Message{
